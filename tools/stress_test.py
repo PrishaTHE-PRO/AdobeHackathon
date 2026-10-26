@@ -19,26 +19,20 @@ from pathlib import Path
 
 from engine.resize import resize
 
-CATALOGUE = {
-    "ig_post": (1080, 1080),
-    "ig_portrait": (1080, 1350),
-    "story": (1080, 1920),
-    "yt_thumb": (1280, 720),
-    "fb_post": (1200, 630),
-    "twitter_header": (1500, 500),
-    "linkedin_banner": (1584, 396),
-    "fb_cover": (820, 312),
-    "leaderboard": (728, 90),
-    "billboard": (970, 250),
-    "mobile_banner": (320, 50),
-    "med_rect": (300, 250),
-    "half_page": (300, 600),
-    "skyscraper": (160, 600),
-    "pinterest": (1000, 1500),
-    "a4_poster": (2480, 3508),
-    "slide_16x9": (1920, 1080),
-    "web_wide": (1600, 400),
+# Tier 1 = the fundamentals (everyday social formats), tier 2 = web/print,
+# tier 3 = extreme aspect ratios. Build and judge in that order.
+TIERS = {
+    1: {"ig_post": (1080, 1080), "ig_portrait": (1080, 1350), "story": (1080, 1920),
+        "yt_thumb": (1280, 720), "fb_post": (1200, 630), "slide_16x9": (1920, 1080)},
+    2: {"pinterest": (1000, 1500), "a4_poster": (2480, 3508), "twitter_header": (1500, 500),
+        "linkedin_banner": (1584, 396), "fb_cover": (820, 312), "web_wide": (1600, 400),
+        "med_rect": (300, 250), "half_page": (300, 600)},
+    3: {"billboard": (970, 250), "leaderboard": (728, 90), "skyscraper": (160, 600),
+        "mobile_banner": (320, 50)},
 }
+TIER_NAMES = {1: "common social", 2: "web & print", 3: "extreme ratios", 0: "custom"}
+CATALOGUE = {k: v for tier in TIERS.values() for k, v in tier.items()}
+TIER_OF = {k: t for t, tier in TIERS.items() for k in tier}
 
 INPUT_DIR = Path("input")
 OUT_DIR = Path("output/stress")
@@ -164,6 +158,7 @@ def main() -> int:
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     n_hard = n_warn = 0
+    summary: dict[int, list[int]] = {}  # tier -> [ok, warn, fail]
     for task_path in sorted(INPUT_DIR.glob("*.json")):
         task = json.loads(task_path.read_text())
         source = task["source"]
@@ -177,7 +172,9 @@ def main() -> int:
             n_hard += len(hard)
             n_warn += len([x for x in warn if not x.startswith("hidden")])
             tag = "FAIL" if hard else ("warn" if any(not x.startswith("hidden") for x in warn) else "ok")
-            print(f"  {name:16s} {w:>4}x{h:<4} {tag}")
+            row = summary.setdefault(TIER_OF.get(name, 0), [0, 0, 0])
+            row[{"ok": 0, "warn": 1, "FAIL": 2}[tag]] += 1
+            print(f"  [t{TIER_OF.get(name, 0)}] {name:16s} {w:>4}x{h:<4} {tag}")
             for msg in hard:
                 print(f"      HARD  {msg}")
             for msg in warn:
@@ -190,6 +187,10 @@ def main() -> int:
                 pngs.append((f"{name} {w}x{h}", png))
         if pngs:
             contact_sheet(pngs, OUT_DIR / f"_sheet_{task_path.stem}.png")
+    print("\nsummary by tier            ok  warn  fail")
+    for tier in sorted(summary):
+        ok, wa, fa = summary[tier]
+        print(f"  tier {tier} {TIER_NAMES[tier]:18s} {ok:3d} {wa:5d} {fa:5d}")
     print(f"\nhard failures: {n_hard}   quality warnings: {n_warn}   (renders in {OUT_DIR}/)")
     return 1 if n_hard else 0
 

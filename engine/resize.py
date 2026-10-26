@@ -333,7 +333,8 @@ class TextItem(Item):
         if fill:
             w = maxw
         else:
-            w = min(maxw, max(self.src_w * t * 1.1, 0.6 * maxw))
+            # room for a comfortable measure (~35 characters) when available
+            w = min(maxw, max(self.src_w * t * 1.1, 0.6 * maxw, 17.5 * fs))
         # make sure the widest word fits, shrinking type if it really must
         while fs > ABS_MIN_FONT and _longest_word_width(el, fs) > w * 0.97:
             if w < maxw:
@@ -738,13 +739,12 @@ class Model:
         texts = [e for e in singles if e["type"] == "text"]
         if texts:
             head = max(texts, key=lambda e: (e["font_size"], e["width"] * e["height"]))
-            sizes = sorted(e["font_size"] for e in texts)
             for e in texts:
                 b = _box(e)
                 if e is head:
                     role = "headline"
-                elif (e["font_size"] <= 0.75 * statistics.median(sizes) or e["font_size"] <= 13) \
-                        and (b[1] + b[3]) / 2 > 0.8 * H:
+                elif e["font_size"] <= max(14, 0.35 * head["font_size"]) \
+                        and e["font_size"] < head["font_size"] and (b[1] + b[3]) / 2 > 0.8 * H:
                     role = "legal"
                 else:
                     role = "body"
@@ -985,10 +985,26 @@ class Engine:
             res = solve(dropped)
             if res is not None:
                 res.dropped = list(dropped)
-                return res
+                break
             if not cands:
                 return None
             dropped.append(cands.pop(0))
+        # it fits - but would letting one or two more minor items go read
+        # better (bigger type, no cramped columns)? keep whichever scores best
+        best, best_score = res, self._score(res, 0.0)
+        minor = [it for it in cands if it.role not in ("logo", "hero")]
+        for _ in range(2):
+            if not minor:
+                break
+            dropped = dropped + [minor.pop(0)]
+            res = solve(dropped)
+            if res is None:
+                break
+            res.dropped = list(dropped)
+            sc = self._score(res, 0.0)
+            if sc > best_score + 0.05:
+                best, best_score = res, sc
+        return best
 
     def _overlays(self, t: float, margin: float, items: list[Item]) -> tuple[dict, list]:
         props, boxes = {}, []
@@ -1016,7 +1032,16 @@ class Engine:
             if self.m.hero in res.dropped:
                 hero = -1
         drop = sum(0.12 + it.priority / 300 for it in res.dropped)
-        return typ + 0.5 * hero - drop + prior
+        # typographic measure: many short lines (a "word column") read badly
+        cramped = 0.0
+        for e in self.m.elements:
+            p = res.props.get(e["id"])
+            if e["type"] != "text" or p is None or any(e["id"] in it.ids for it in res.dropped):
+                continue
+            n = _text_metrics(e, int(p.get("font_size", e["font_size"])), p["width"])[0]
+            if n >= 6 and len(str(e.get("content", ""))) / n < 16:
+                cramped += 0.5
+        return typ + 0.5 * hero - drop - cramped + prior
 
     # ---- layout families -------------------------------------------------
     def stack(self) -> Optional[Result]:
@@ -1216,8 +1241,55 @@ class Engine:
             return res
         return self._with_drops("row", solve, everything)
 
+    def faithful(self) -> Optional[Result]:
+        """Same shape as the source: the designer's own composition is the
+        best layout there is, so keep it and only scale it - provided every
+        visible text stays readable at the new scale."""
+        rs, rt = self.sw / self.sh, self.W / self.H
+        if abs(rt / rs - 1) > 0.06:
+            return None
+        s = min(self.W / self.sw, self.H / self.sh)
+        ox, oy = (self.W - self.sw * s) / 2, (self.H - self.sh * s) / 2
+        res = Result("faithful")
+        for it in list(self.m.flow) + list(self.m.overlays):
+            for e in it.elems:
+                p = {"x": ox + e["x"] * s, "y": oy + e["y"] * s,
+                     "width": e["width"] * s, "height": e["height"] * s}
+                if e["type"] == "text":
+                    fs = int(round(e["font_size"] * s))
+                    if fs < MIN_FONT:
+                        return None
+                    p["font_size"] = fs
+                    # the box hugs the real text so it claims no phantom space
+                    p["height"] = _text_metrics(e, fs, p["width"])[3]
+                    if e.get("group_id") or any(e in it.elems and isinstance(it, GroupItem)
+                                                and it.labels for it in self.m.flow + self.m.overlays):
+                        # labels stay vertically centred on their shape
+                        cy = oy + (e["y"] + e["height"] / 2) * s
+                        p["y"] = cy - p["height"] / 2
+                if e["type"] == "shape":
+                    for k in ("corner_radius", "stroke_width"):
+                        if e.get(k):
+                            p[k] = e[k] * s
+                res.props[e["id"]] = p
+        # the source itself must be collision-free to be worth keeping
+        units = [[i for i in it.ids] for it in list(self.m.flow) + list(self.m.overlays)]
+        boxes = {eid: (p["x"], p["y"], p["x"] + p["width"], p["y"] + p["height"])
+                 for eid, p in res.props.items()}
+        for i, a in enumerate(units):
+            for b in units[i + 1:]:
+                for ea in a:
+                    for eb in b:
+                        if _inter(boxes[ea], boxes[eb]) > 4:
+                            return None
+        res.t = s
+        return res
+
     # ---- driver ----------------------------------------------------------
     def run(self) -> Result:
+        same_shape = self.faithful()
+        if same_shape is not None:
+            return same_shape
         r = self.W / self.H
         cands: list[Result] = []
         for kind, fn, prior in (
