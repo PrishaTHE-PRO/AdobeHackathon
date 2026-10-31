@@ -60,7 +60,7 @@ A good resize moves the furniture. We followed five principles, in priority orde
 1. **Respect the original.** If the new canvas has the same shape as the source (within 6%), the designer's own composition is the best layout available. The engine keeps it and only scales it. That happens only if every text stays readable and the source has no overlaps.
 2. **Keep the brand and the hierarchy.** Colours, fonts, copy, logo and product art are never altered. All text scales by one shared factor, so the headline stays the most dominant text, then the subhead, then the fine print.
 3. **Keep designed units together.** Button shape + label, badge, rotated ribbon, image + caption, and a card panel with its contents all move and scale as one unit. Rows of badges or gallery images stay rows (they wrap only if they must).
-4. **Readability comes first.** No body text below 10px (12px for the headline), no text over images, and no cramped word columns. Text is measured with the actual brand fonts, so what the engine plans is what the renderer draws.
+4. **Readability comes first.** No body text below 10px (12px for the headline). On larger canvases the floor grows, up to 15/18px on posters (idea from the `aditi` branch). There is no text over images, and no cramped word columns. Text is measured with the actual brand fonts, so what the engine plans is what the renderer draws.
 5. **Degrade gracefully.** When a canvas is genuinely too small (17 elements into a 728×90 banner), the least important units are hidden in this order: legal → badges / ribbon → secondary text. The headline and CTA are never hidden. Content is never squeezed into illegibility.
 
 ---
@@ -154,10 +154,21 @@ We also fuzz-tested the engine on designs it was never tuned on, including left-
 ### Reproduce the tests
 
 ```bash
+python -m unittest discover -s tests -v              # regression suite (~15 s)
 python -m tools.stress_test                          # all samples x 18 formats -> output/stress/
 python -m tools.stress_test --sizes story,1200x300   # chosen catalogue keys or WxH
 python -m tools.stress_test --no-render              # rule checks only (fast)
 ```
+
+**Regression suite** (`tests/test_resize.py`, adapted from the `aditi` branch). Each sample runs as-is and as 8 harder variants (longer headline, longer subhead, 4 extra badges, 12 extra texts, missing asset, a single image, no CTA, no group ids) across 8 common formats: 216 combinations. Every output must:
+- keep the same ids in the same order
+- leave all protected fields unchanged
+- stay fully on-canvas, including rotated bounds
+- keep image proportions
+- keep button labels inside their buttons
+- give the same output every time, without modifying its input
+
+Further tests cover injected engine failures, missing fonts, running from another working directory, blocked network access, long unbreakable words, the missing-asset case, and same-shape preservation.
 
 For each pair, the stress test does the following:
 - **Checks hard rules:** same ids, unchanged `content` / `font_family` / `asset_id`, nothing off-canvas (including rotated bounds), and images within 5% of their aspect ratio.
@@ -187,17 +198,21 @@ It exits with code 1 if any hard rule fails.
 
 ## Team branches
 
-We built two engines in parallel and compared them with the same stress test (3 designs × 18 formats):
+We built three engines in parallel and compared them with the same stress test (3 designs × 18 formats):
 
-| | `resize.py` (this branch) | `saanvi` branch (`resize_saanvi.py`) |
-|---|---|---|
-| Hard-rule failures | 0 | 0 |
-| Text below 9px | 2 | 60 |
-| Missing asset | hidden cleanly | grey placeholder box |
-| Time per resize | ~15 ms | ~1.5 s |
-| Decorations over text/buttons | 16 / 18 sizes → **1 / 18 after merging Saanvi's idea** | rarely |
+| | `resize.py` (this branch) | `saanvi` branch | `aditi` branch |
+|---|---|---|---|
+| Hard-rule failures | 0 | 0 | 0 |
+| Text collisions | 0 | 0 | 10 |
+| Text below 9px | 2 | 60 | 81 |
+| Missing asset | hidden cleanly | grey placeholder box | grey placeholder box |
+| Time per resize | ~15 ms | ~1.5 s | ~40 ms |
 
-The submitted engine is `resize.py`. From the `saanvi` branch we merged its free-space decoration placement, which was clearly better than our fixed-corner anchoring. Her full column-composition engine remains on that branch for reference.
+The submitted engine is `resize.py`. We merged the best idea from each teammate's branch:
+- **From `saanvi`:** free-space placement of decorations. Decorations now cover text or buttons in 1 of 18 sizes instead of 16.
+- **From `aditi`:** the regression test suite (adapted to this engine's contract) and a minimum font size that grows with the canvas. Her design variations also exposed a bug: the emergency fallback didn't hide missing assets. That is now fixed.
+
+Their full engines remain on their branches for reference.
 
 ## Repository layout
 
@@ -205,6 +220,7 @@ The submitted engine is `resize.py`. From the `saanvi` branch we merged its free
 engine/resize.py        the engine (all of our logic)
 engine/main.py          starter orchestrator: input/ -> resize() -> output/ (unchanged)
 tools/stress_test.py    multi-format test harness + contact sheets
+tests/test_resize.py    regression suite (python -m unittest discover -s tests -v)
 docs/results/           committed renders of the results above
 renderer/               vendored converter around cr-renderer (unchanged)
 brand_kit/              brand fonts and assets

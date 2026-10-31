@@ -1452,7 +1452,11 @@ def _run_engine(source: dict, target_canvas: dict):
     global MIN_FONT, MIN_HEADLINE_FONT
     saved = MIN_FONT, MIN_HEADLINE_FONT
     try:
-        for mins in (saved, (8, 8), (ABS_MIN_FONT, ABS_MIN_FONT)):
+        # readable floor grows with the canvas (idea from the `aditi` branch):
+        # 10/12 px on small canvases, up to 15/18 px on posters
+        k = max(1.0, min(1.5, min(target_canvas["width"], target_canvas["height"]) / 720.0))
+        scaled = (round(saved[0] * k), round(saved[1] * k))
+        for mins in (scaled, saved, (8, 8), (ABS_MIN_FONT, ABS_MIN_FONT)):
             MIN_FONT, MIN_HEADLINE_FONT = mins
             try:
                 eng = Engine(source, target_canvas)
@@ -1483,6 +1487,8 @@ def resize(source: dict[str, Any], target_canvas: dict[str, Any]) -> dict[str, A
             if e["type"] == "image" and len(source["elements"]) > 1 and \
                     _inter(_box(e), (0, 0, sw, sh)) / (sw * sh) > 0.85:
                 props[e["id"]] = {"x": 0, "y": 0, "width": W, "height": H}
+            if e["type"] == "image" and _asset_missing(e.get("asset_id")):
+                hidden_ids.add(e["id"])
     else:
         props = dict(res.props)
         s_dec = min(W / sw, H / sh) if min(W / sw, H / sh) > 0.25 else math.sqrt(W * H / (sw * sh))
