@@ -80,7 +80,7 @@ The input has no semantic labels, so roles are inferred from geometry, z-order, 
 | Role | How it's recognised | How it's adapted |
 |---|---|---|
 | Background | image/shape covering more than 85% of the canvas | full-bleed on the new canvas (`fit: cover`, which is allowed to crop) |
-| Decoration | faint (alpha < 0.5) or off-canvas free shapes | scaled, pinned to the same corner, kept fully inside the canvas |
+| Decoration | faint (alpha < 0.5) or off-canvas free shapes | placed last, in free space: starts from its original corner, then searches a grid of spots and sizes for the one covering the least text and buttons (idea from the `saanvi` branch) |
 | Logo | small image near the top, wide aspect, or `logo` in the asset name | aspect-locked; pinned top in stacks, leads banner rows |
 | Hero image | largest remaining image | aspect-locked; gets the space that's left, never shrinks below the type scale |
 | Headline / body / legal | largest font / mid-size / ≤14px near the bottom | one shared type scale with readability floors |
@@ -116,7 +116,7 @@ Within each layout, the engine also checks whether hiding one or two *minor* ite
 
 ### 4. Finish
 
-- Backgrounds go full-bleed, decorations are re-anchored, and panels are re-wrapped around their contents.
+- Backgrounds go full-bleed and panels are re-wrapped around their contents. Then decorations are placed in free space around the finished layout.
 - Every element is clamped inside the canvas. For rotated elements, both the box and its rotated bounds are clamped.
 - **Hidden elements** keep their `id` and an in-canvas, in-proportion box, and get `opacity: 0`. For text, the colour alpha is also set to 0, because cr-renderer ignores `opacity` on text. The `content` itself is never changed.
 - If every layout fails (which never happened in testing), a uniform letterbox fallback guarantees a valid, undistorted output.
@@ -184,6 +184,20 @@ It exits with code 1 if any hard rule fails.
 - **Extreme ratios with long copy.** At sizes like 320×50, some content must be hidden. A finale add-on could let the user choose what survives, or offer several layout options.
 - **Heuristic roles.** Roles are inferred from geometry. Very unusual designs (e.g. several equally large headlines) may be ranked in an unexpected order. A multimodal model could refine roles in a future version.
 - **Copy and font adaptation** are deliberately out of scope for stage one, per RULES.md.
+
+## Team branches
+
+We built two engines in parallel and compared them with the same stress test (3 designs × 18 formats):
+
+| | `resize.py` (this branch) | `saanvi` branch (`resize_saanvi.py`) |
+|---|---|---|
+| Hard-rule failures | 0 | 0 |
+| Text below 9px | 2 | 60 |
+| Missing asset | hidden cleanly | grey placeholder box |
+| Time per resize | ~15 ms | ~1.5 s |
+| Decorations over text/buttons | 16 / 18 sizes → **1 / 18 after merging Saanvi's idea** | rarely |
+
+The submitted engine is `resize.py`. From the `saanvi` branch we merged its free-space decoration placement, which was clearly better than our fixed-corner anchoring. Her full column-composition engine remains on that branch for reference.
 
 ## Repository layout
 

@@ -1337,6 +1337,42 @@ def _corner_anchor(el: dict, sw: float, sh: float, W: float, H: float, s: float)
     return {"x": x, "y": y, "width": w, "height": h}
 
 
+def _place_decor(decor: list[dict], props: dict, by_id: dict, skip: set,
+                 sw: float, sh: float, W: float, H: float, s: float) -> dict[str, dict]:
+    """Free-space search for decorative shapes (idea from the `saanvi`
+    branch). Starts from the corner-anchored spot, also tries a grid of
+    spots at 100/75/50% size, and keeps the one that covers the least text
+    and buttons. Pictures may be lightly layered over; decorations also
+    keep apart from each other."""
+    blockers = []
+    for eid, p in props.items():
+        if eid in skip or eid not in by_id:
+            continue
+        weight = 0.4 if by_id[eid]["type"] == "image" else 1.0
+        blockers.append(((p["x"], p["y"], p["x"] + p["width"], p["y"] + p["height"]), weight))
+    out: dict[str, dict] = {}
+    for e in decor:
+        home = _corner_anchor(e, sw, sh, W, H, s)
+        w0, h0 = home["width"], home["height"]
+        best = None
+        for f in (1.0, 0.75, 0.5):
+            w, h = w0 * f, h0 * f
+            spots = [(home["x"] + (w0 - w) / 2, home["y"] + (h0 - h) / 2)]
+            spots += [(i / 4 * (W - w), j / 4 * (H - h)) for i in range(5) for j in range(5)]
+            for px, py in spots:
+                px, py = min(max(px, 0.0), max(0.0, W - w)), min(max(py, 0.0), max(0.0, H - h))
+                rect = (px, py, px + w, py + h)
+                cost = sum(wt * _inter(rect, b) for b, wt in blockers)
+                cost += 0.2 * (1 - f) * w0 * h0          # prefer keeping its size
+                cost += 1e-3 * math.hypot(px - home["x"], py - home["y"])  # and its corner
+                if best is None or cost < best[0]:
+                    best = (cost, px, py, w, h)
+        _, px, py, w, h = best
+        out[e["id"]] = {"x": px, "y": py, "width": w, "height": h}
+        blockers.append(((px, py, px + w, py + h), 0.3))
+    return out
+
+
 def _clamp(el: dict, W: float, H: float) -> None:
     w, h = float(el["width"]), float(el["height"])
     rot = float(el.get("rotation", 0) or 0)
@@ -1455,8 +1491,6 @@ def resize(source: dict[str, Any], target_canvas: dict[str, Any]) -> dict[str, A
             props[bg["id"]] = {"x": 0, "y": 0, "width": W, "height": H}
             if bg["type"] == "image":
                 props[bg["id"]]["fit"] = "cover"
-        for d in m.decor:
-            props[d["id"]] = _corner_anchor(d, sw, sh, W, H, s_dec)
         for it in res.dropped:
             hidden_ids.update(it.ids)
         hidden_ids.update(e["id"] for e in m.hidden)
@@ -1483,6 +1517,9 @@ def resize(source: dict[str, Any], target_canvas: dict[str, Any]) -> dict[str, A
             u = _union(boxes)
             props[sh_el["id"]] = {"x": u[0] - pad, "y": u[1] - pad,
                                   "width": u[2] - u[0] + 2 * pad, "height": u[3] - u[1] + 2 * pad}
+        # decorations go last, into free space around the finished layout
+        bg_ids = {e["id"] for e in m.backgrounds}
+        props.update(_place_decor(m.decor, props, by_id, hidden_ids | bg_ids, sw, sh, W, H, s_dec))
 
     for e in out_elems:
         p = props.get(e["id"])
