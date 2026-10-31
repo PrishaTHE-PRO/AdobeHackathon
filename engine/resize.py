@@ -37,6 +37,12 @@ from typing import Any, Callable, Optional
 MIN_FONT = 10           # px, smallest body text we will emit
 MIN_HEADLINE_FONT = 12  # px, smallest headline we will emit
 ABS_MIN_FONT = 7        # px, last resort when a single word cannot fit
+# Buttons and badges: the most padding a re-laid-out label keeps around it,
+# in ems of its font size (sides, and above/below the text line). Designers
+# often leave far more air in the source; a real button is ~2.5-3x its font
+# height with ~1.5-2em sides, so anything beyond this reads as oversized.
+BTN_MAX_HPAD_EM = 1.75
+BTN_MAX_VPAD_EM = 0.65
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _FONT_DIRS = [Path("brand_kit/fonts"), _REPO_ROOT / "brand_kit" / "fonts"]
@@ -276,6 +282,65 @@ def _asset_missing(asset_id: Optional[str]) -> bool:
     return not any((d / asset_id).is_file() for d in dirs)
 
 
+def _asset_path(asset_id: Optional[str]) -> Optional[Path]:
+    if not asset_id:
+        return None
+    for d in _ASSET_DIRS:
+        if (d / asset_id).is_file():
+            return d / asset_id
+    return None
+
+
+_FOCAL_CACHE: dict[str, Optional[tuple[float, float, int, int]]] = {}
+
+
+def _bg_focal(asset_id: Optional[str]) -> Optional[tuple[float, float, int, int]]:
+    """Where a background's eye lands: the centre of its brightest *smooth*
+    region (a glow, a halo, a lit area), as fractions of the asset, plus the
+    asset size. Only reads pixels - never changes them. Returns None when
+    the background has no clear focal point (flat gradients, even textures,
+    or a bright region so large it is really the whole image)."""
+    if not asset_id:
+        return None
+    if asset_id in _FOCAL_CACHE:
+        return _FOCAL_CACHE[asset_id]
+    res: Optional[tuple[float, float, int, int]] = None
+    path = _asset_path(asset_id)
+    if path is not None:
+        try:
+            from PIL import Image, ImageFilter
+            im = Image.open(path).convert("L")
+            aw, ah = im.size
+            sw = 48
+            sh = max(8, int(round(sw * ah / aw)))
+            small = im.resize((sw, sh), Image.BOX).filter(ImageFilter.GaussianBlur(3))
+            px = list(small.getdata())
+            peak = max(px)
+            med = sorted(px)[len(px) // 2]
+            if peak - med >= 10:  # a real glow, not noise on a flat field
+                thr = (peak + med) / 2
+                xs = [i % sw for i, v in enumerate(px) if v >= thr]
+                ys = [i // sw for i, v in enumerate(px) if v >= thr]
+                if xs and (max(xs) - min(xs) + 1) <= 0.7 * sw and (max(ys) - min(ys) + 1) <= 0.7 * sh:
+                    # centroid of the bright region (steadier than the single peak pixel)
+                    fx = (sum(xs) / len(xs) + 0.5) / sw
+                    fy = (sum(ys) / len(ys) + 0.5) / sh
+                    res = (fx, fy, aw, ah)
+        except Exception:  # pragma: no cover - no PIL / unreadable file
+            res = None
+    _FOCAL_CACHE[asset_id] = res
+    return res
+
+
+def _cover_point(fx: float, fy: float, aw: int, ah: int, W: float, H: float) -> tuple[float, float]:
+    """Map a point given as fractions of an asset to fractions of a W x H
+    canvas the asset fills with fit=cover (scale to cover, crop the middle),
+    mirroring the renderer."""
+    sc = max(W / aw, H / ah)
+    nw, nh = aw * sc, ah * sc
+    return (fx * nw - (nw - W) / 2) / W, (fy * nh - (nh - H) / 2) / H
+
+
 # ---------------------------------------------------------------------------
 # Layout units
 # ---------------------------------------------------------------------------
@@ -461,13 +526,13 @@ class GroupItem(Item):
                 glyph_w_src = min(_single_line_width(lab, int(round(lab["font_size"]))), lsrc[2] - lsrc[0])
                 pad_src = max(0.0, ((bsrc[2] - bsrc[0]) - glyph_w_src) / 2)
                 pad = max(pad_src * s, 0.6 * fs)
-                need = _single_line_width(lab, fs) / 0.97 + 2 * pad if src_lines == 1 else 0
+                # 0.94 (not the usual 0.97): the label box needs a little headroom
+                # over the glyph width or the wrap check lands exactly on the edge
+                need = _single_line_width(lab, fs) / 0.94 + 2 * pad if src_lines == 1 else 0
                 if need > b["width"]:
                     grow = need - b["width"]
                     b["x"] -= grow / 2
                     b["width"] = need
-                if b.get("corner_radius"):
-                    b["corner_radius"] = min(b["corner_radius"], b["height"] / 2)
                 # vertical: centre the label on the shape when it was centred
                 n, _, _, th = _text_metrics(lab, fs, max(1.0, b["width"] - 2 * pad))
                 lcy = (lsrc[1] + lsrc[3]) / 2
@@ -476,6 +541,20 @@ class GroupItem(Item):
                     grow = th + 4 - b["height"]
                     b["y"] -= grow / 2
                     b["height"] += grow
+                # a single-line label on a button/badge never keeps more air
+                # around it than a real button would (see BTN_MAX_*_EM)
+                if src_lines == 1 and n == 1 and len(self.labels) == 1 and self.role != "ribbon":
+                    max_w = _single_line_width(lab, fs) / 0.94 + 2 * BTN_MAX_HPAD_EM * fs
+                    if b["width"] > max_w:
+                        b["x"] += (b["width"] - max_w) / 2
+                        b["width"] = max_w
+                        pad = BTN_MAX_HPAD_EM * fs
+                    max_h = th + 2 * BTN_MAX_VPAD_EM * fs
+                    if b["height"] > max_h:
+                        b["y"] += (b["height"] - max_h) / 2
+                        b["height"] = max_h
+                if b.get("corner_radius"):
+                    b["corner_radius"] = min(b["corner_radius"], b["height"] / 2)
                 if abs(lcy - bcy) < 0.25 * (bsrc[3] - bsrc[1]):
                     p["y"] = b["y"] + b["height"] / 2 - th / 2
                 p["height"] = th
@@ -867,8 +946,12 @@ def _search(fn: Callable[[float], Optional[Result]], lo: float, hi: float) -> Op
 
 def _stack(items: list[Item], region, t: float, align: str, fill: bool,
            hero: Optional[ImageItem] = None, hero_min: float = 0.0,
-           hero_max: float = 1e9, gap_ref: float = 20.0) -> Optional[tuple[dict, list, float]]:
-    """Vertical stack inside `region`. Returns (props, boxes, hero_area)."""
+           hero_max: float = 1e9, gap_ref: float = 20.0,
+           focal: Optional[tuple[Optional[Item], float]] = None) -> Optional[tuple[dict, list, float]]:
+    """Vertical stack inside `region`. Returns (props, boxes, hero_area).
+    `focal` = (item, y): slide the un-anchored block so that `item`'s centre
+    (or, with item None, the block's own centre) lands on canvas y, as far
+    as the block can move; otherwise it is centred in its free space."""
     x0, y0, x1, y1 = region
     rw, rh = x1 - x0, y1 - y0
     if rw <= 4 or rh <= 4:
@@ -933,8 +1016,29 @@ def _stack(items: list[Item], region, t: float, align: str, fill: bool,
     def block_h(ix):
         return sum(lays[i].h for i in ix) + g * max(0, len(ix) - 1)
 
+    def block_start(lo, hi):
+        """Top of the middle block within [lo, hi]: centred, unless a focal
+        item asks for a particular y and the block can slide there."""
+        bh = block_h(middle)
+        y = lo + max(0.0, (hi - lo - bh) / 2)
+        if focal is not None and middle:
+            fit, fy = focal
+            want = None
+            if fit is None:
+                want = fy - bh / 2
+            else:
+                off = 0.0
+                for i in middle:
+                    if items[i] is fit:
+                        want = fy - off - lays[i].h / 2
+                        break
+                    off += lays[i].h + g
+            if want is not None:
+                y = min(max(want, lo), max(lo, hi - bh))
+        return y
+
     if not top and not bottom:
-        y = y0 + (rh - block_h(middle)) / 2
+        y = block_start(y0, y1)
         for i in middle:
             y = put(i, y) + g
     else:
@@ -949,7 +1053,7 @@ def _stack(items: list[Item], region, t: float, align: str, fill: bool,
         if middle:
             lo = top_end + (g if top else 0)
             hi = bottom_start - (g if bottom else 0)
-            y = lo + max(0.0, (hi - lo - block_h(middle)) / 2)
+            y = block_start(lo, hi)
             for i in middle:
                 y = put(i, y) + g
     return props, boxes, hero_area
@@ -969,6 +1073,36 @@ class Engine:
             if d > 0:
                 gaps.append(d)
         self.gap_ref = min(max(statistics.median(gaps) if gaps else 24.0, 12.0), 40.0)
+        self.focal = self._focal_target()
+
+    def _focal_target(self) -> Optional[tuple[Optional[Item], float]]:
+        """Where the eye should land in a vertical stack.
+
+        If the background has a focal point (the glow / halo in a gradient,
+        a lit area in a photo) that is still inside the middle band of the
+        target after the cover crop, the stack is slid so that the design's
+        focal element sits on it: the hero image when there is one, else
+        the whole text block (headline, body, CTA) is centred on it. Logos
+        and legal text keep their top / bottom anchors, so the block is
+        balanced against them as well.
+
+        On wide banners the glow is cropped to the top edge or away
+        entirely, and on flat backgrounds there is no glow; then there is
+        nothing to follow and the block is centred in its free space."""
+        m = self.m
+        bgs = [e for e in m.backgrounds if e["type"] == "image" and not _asset_missing(e.get("asset_id"))]
+        if not bgs:
+            return None
+        bg = max(bgs, key=lambda e: e["width"] * e["height"])
+        f = _bg_focal(bg.get("asset_id"))
+        if f is None:
+            return None
+        fx, fy, aw, ah = f
+        _, tgt_y = _cover_point(fx, fy, aw, ah, self.W, self.H)
+        if not 0.2 <= tgt_y <= 0.8:
+            return None
+        item: Optional[Item] = m.hero if (m.hero is not None and m.hero in m.flow) else None
+        return item, tgt_y * self.H
 
     # ---- helpers ---------------------------------------------------------
     def _droppable(self, items: list[Item]) -> list[Item]:
@@ -1063,7 +1197,8 @@ class Engine:
                 def fn(t):
                     out = _stack(its, reg, t, m.align, False, hero if hero in its else None,
                                  hero_min if hero in its else 0.0,
-                                 (reg[3] - reg[1]) * 0.6, self.gap_ref)
+                                 (reg[3] - reg[1]) * 0.6, self.gap_ref,
+                                 focal=self.focal if self.focal and (self.focal[0] is None or self.focal[0] in its) else None)
                     if out is None:
                         return None
                     r = Result("stack")
